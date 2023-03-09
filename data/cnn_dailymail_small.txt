@@ -1,0 +1,1 @@
+# CNN DailyMail text summarization dataset in the public domain, from https://www.kaggle.com/datasets/gowrishankarp/newspaper-text-summarization-cnn-dailymail
