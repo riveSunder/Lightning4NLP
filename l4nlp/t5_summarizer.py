@@ -1,6 +1,5 @@
 import os
 import argparse
-import json
 
 import numpy as np
 import lightning as pl
@@ -20,20 +19,20 @@ from torch.utils.data import Dataset, DataLoader
 class SummaryDataset(Dataset):
 
     def __init__(self,\
-                data, tokenizer,\
+                data_frame, tokenizer,\
                 text_max_length=512,\
                 summary_max_length=128):
         self.tokenizer = tokenizer
-        self.data = data
+        self.data_frame = data_frame
         self.text_max_length = text_max_length
         self.summary_max_length = summary_max_length
 
     def __len__(self):
-        return len(self.data)
+        return len(self.data_frame)
 
     def __getitem__(self, index):
 
-        data_row = self.data.iloc[index]
+        data_row = self.data_frame.iloc[index]
 
         text = data_row["text"]
         summary = data_row["summary"]
@@ -108,7 +107,7 @@ class SummaryPLDataModule(pl.LightningDataModule):
                 self.train_dataset, \
                 batch_size=self.batch_size, \
                 shuffle=True, \
-                num_workers=16 \
+                num_workers=2 \
                 )
     
     def val_dataloader(self):
@@ -117,7 +116,7 @@ class SummaryPLDataModule(pl.LightningDataModule):
                 self.val_dataset, \
                 batch_size=self.batch_size, \
                 shuffle=False, \
-                num_workers=16 \
+                num_workers=2 \
                 )
 
 class Summarizer(pl.LightningModule):
@@ -227,7 +226,7 @@ class Summarizer(pl.LightningModule):
         return decoded
 
 def summarize_train(df_train, df_val, number_epochs=1, \
-        batch_size=1, model_name="t5-small"):
+        batch_size=1, model_name="t5-small", device="gpu"):
 
     # instantiate the tokenizer and model
 
@@ -241,17 +240,26 @@ def summarize_train(df_train, df_val, number_epochs=1, \
             batch_size=batch_size \
             )
 
-    trainer = pl.Trainer(max_epochs=number_epochs,\
-        accelerator="gpu",\
-        devices=1)
+    if device == "gpu":
+        trainer = pl.Trainer(max_epochs=number_epochs,\
+            accelerator="gpu",\
+            devices=1)
+    else:
+        trainer = pl.Trainer(max_epochs=number_epochs)
 
     trainer.fit(model, data_module)
 
     return model
 
-def summarize_validate(model, df_val, number_samples=1):
+def summarize_validate(model_name, parameters_filepath, df_val, number_samples=1):
 
     summary = ""
+
+
+    model = Summarizer(model_name=model_name)
+    model.load_state_dict(torch.load(parameters_filepath))
+
+    tokenizer = T5Tokenizer.from_pretrained(model_name, model_max_length=512)
 
     for sample_number in range(number_samples):
 
@@ -276,23 +284,35 @@ if __name__ == "__main__":
 
     parser.add_argument("-m", "--model_name", type=str, default="t5-small",\
             help="model name, options: t5-small, t5-base")
+    parser.add_argument("-d", "--device", type=str, default="gpu",\
+            help="hardware device to use for training")
     parser.add_argument("-e", "--number_epochs", type=int, default=1,\
             help="number of epochs to train")
+    parser.add_argument("-f", "--df_filepath", type=str, default="data/cnn_dailymail",\
+            help="path to training dataframe csv directory")
     parser.add_argument("-b", "--batch_size", type=int, default=1,\
             help="number of samples per batch")
     parser.add_argument("-s", "--number_samples", type=int, default=1,\
             help="number of samples for summarization examples")
+    parser.add_argument("-t", "--truncate", type=int, default=-1,\
+            help="truncate training/val dataframes to this many samples")
 
 
     args = parser.parse_args()
+    batch_size = args.batch_size
     model_name = args.model_name
+    number_epochs = args.number_epochs
+    my_device = args.device
+    df_filepath = args.df_filepath
+    truncate = args.truncate
+    number_samples = args.number_samples
     
     # load the csv data as pandas dataframes
-    filepath = os.path.join("data", "cnn_dailymail", "train.csv")
-    test_filepath = os.path.join("cnn_dailymail", "test.csv")
-    val_filepath = os.path.join("cnn_dailymail", "validation.csv")
-    df = pd.read_csv(filepath)#[:4000]
-    df_val = pd.read_csv(val_filepath)#[:400]
+    filepath = os.path.join(df_filepath, "train.csv")
+    test_filepath = os.path.join(df_filepath, "test.csv")
+    val_filepath = os.path.join(df_filepath, "validation.csv")
+    df = pd.read_csv(filepath)[:truncate]
+    df_val = pd.read_csv(val_filepath)[:truncate]
     df_test = pd.read_csv(test_filepath)
     df_train = df[["article", "highlights"]]
     df_train.columns = ["text", "summary"]
@@ -301,15 +321,19 @@ if __name__ == "__main__":
     df_val = df_val[["article", "highlights"]]
     df_val.columns = ["text", "summary"]
 
-    model = summarize_train(df_train, df_val, number_epochs=args.number_epochs,\
-            batch_size=args.batch_size,\
-            model_name=args.model_name)
+    model = summarize_train(df_train, df_val, number_epochs=number_epochs,\
+            batch_size=batch_size,\
+            model_name=model_name,\
+            device=my_device)
 
 
-    tokenizer = T5Tokenizer.from_pretrained(args.model_name, model_max_length=512)
-    examples = summarize_validate(model, df_val, number_samples=args.number_samples)
+    parameters_filepath = f"{model_name}_summarizer.pt"
+    torch.save(model.state_dict(), parameters_filepath)
 
-    with open("examples.txt", "w") as f:
+    examples = summarize_validate(model_name, parameters_filepath, \
+            df_val, number_samples=number_samples)
+
+    examples_filepath = os.path.splitext(parameters_filepath)[0] + "examples.txt"
+
+    with open(examples_filepath, "w") as f:
         f.write(examples)
-    import pdb; pdb.set_trace()
-    torch.save("model_temp.pt", model.state_dict())
